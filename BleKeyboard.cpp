@@ -11,23 +11,25 @@
 #include "BLEHIDDevice.h"
 #endif // USE_NIMBLE
 #include "HIDTypes.h"
+// #include "HIDKeyboardTypes.h"
 #include <driver/adc.h>
 #include "sdkconfig.h"
 
 #include "BleKeyboard.h"
 
 #if defined(CONFIG_ARDUHAL_ESP_LOG)
-  #include "esp32-hal-log.h"
-  #define LOG_TAG ""
+#include "esp32-hal-log.h"
+#define LOG_TAG ""
 #else
-  #include "esp_log.h"
-  static const char* LOG_TAG = "BLEDevice";
+#include "esp_log.h"
+static const char* LOG_TAG = "BLEDevice";
 #endif
 
 
 // Report IDs:
 #define KEYBOARD_ID 0x01
 #define MEDIA_KEYS_ID 0x02
+#define MOUSE_ID 0x03
 
 static const uint8_t _hidReportDescriptor[] = {
   USAGE_PAGE(1),      0x01,          // USAGE_PAGE (Generic Desktop Ctrls)
@@ -63,7 +65,7 @@ static const uint8_t _hidReportDescriptor[] = {
   USAGE_MINIMUM(1),   0x00,          //   USAGE_MINIMUM (0)
   USAGE_MAXIMUM(1),   0x65,          //   USAGE_MAXIMUM (0x65)
   HIDINPUT(1),        0x00,          //   INPUT (Data,Array,Abs,No Wrap,Linear,Preferred State,No Null Position)
-  END_COLLECTION(0),                 // END_COLLECTION
+  END_COLLECTION(0),                 //   END_COLLECTION
   // ------------------------------------------------- Media Keys
   USAGE_PAGE(1),      0x0C,          // USAGE_PAGE (Consumer)
   USAGE(1),           0x01,          // USAGE (Consumer Control)
@@ -91,124 +93,216 @@ static const uint8_t _hidReportDescriptor[] = {
   USAGE(2),           0x83, 0x01,    //   Usage (Media sel)   ; bit 6: 64
   USAGE(2),           0x8A, 0x01,    //   Usage (Mail)        ; bit 7: 128
   HIDINPUT(1),        0x02,          //   INPUT (Data,Var,Abs,No Wrap,Linear,Preferred State,No Null Position)
-  END_COLLECTION(0)                  // END_COLLECTION
+  END_COLLECTION(0),                 // END_COLLECTION
+
+  // ------------------------------------------------- Mouse
+  USAGE_PAGE(1),       0x01, // USAGE_PAGE (Generic Desktop)
+  USAGE(1),            0x02, // USAGE (Mouse)
+  COLLECTION(1),       0x01, // COLLECTION (Application)
+  USAGE(1),            0x01, //   USAGE (Pointer)
+  COLLECTION(1),       0x00, //   COLLECTION (Physical)
+  REPORT_ID(1),        MOUSE_ID, //     REPORT_ID (1)
+  // ------------------------------------------------- Buttons (Left, Right, Middle, Back, Forward)
+  USAGE_PAGE(1),       0x09, //     USAGE_PAGE (Button)
+  USAGE_MINIMUM(1),    0x01, //     USAGE_MINIMUM (Button 1)
+  USAGE_MAXIMUM(1),    0x05, //     USAGE_MAXIMUM (Button 5)
+  LOGICAL_MINIMUM(1),  0x00, //     LOGICAL_MINIMUM (0)
+  LOGICAL_MAXIMUM(1),  0x01, //     LOGICAL_MAXIMUM (1)
+  REPORT_SIZE(1),      0x01, //     REPORT_SIZE (1)
+  REPORT_COUNT(1),     0x05, //     REPORT_COUNT (5)
+  HIDINPUT(1),         0x02, //     INPUT (Data, Variable, Absolute) ;5 button bits
+  // ------------------------------------------------- Padding
+  REPORT_SIZE(1),      0x03, //     REPORT_SIZE (3)
+  REPORT_COUNT(1),     0x01, //     REPORT_COUNT (1)
+  HIDINPUT(1),         0x03, //     INPUT (Constant, Variable, Absolute) ;3 bit padding
+  // ------------------------------------------------- X/Y position, Wheel
+  USAGE_PAGE(1),       0x01, //     USAGE_PAGE (Generic Desktop)
+  USAGE(1),            0x30, //     USAGE (X)
+  USAGE(1),            0x31, //     USAGE (Y)
+  USAGE(1),            0x38, //     USAGE (Wheel)
+  LOGICAL_MINIMUM(1),  0x81, //     LOGICAL_MINIMUM (-127)
+  LOGICAL_MAXIMUM(1),  0x7f, //     LOGICAL_MAXIMUM (127)
+  REPORT_SIZE(1),      0x08, //     REPORT_SIZE (8)
+  REPORT_COUNT(1),     0x03, //     REPORT_COUNT (3)
+  HIDINPUT(1),         0x06, //     INPUT (Data, Variable, Relative) ;3 bytes (X,Y,Wheel)
+  // ------------------------------------------------- Horizontal wheel
+  USAGE_PAGE(1),       0x0c, //     USAGE PAGE (Consumer Devices)
+  USAGE(2),      0x38, 0x02, //     USAGE (AC Pan)
+  LOGICAL_MINIMUM(1),  0x81, //     LOGICAL_MINIMUM (-127)
+  LOGICAL_MAXIMUM(1),  0x7f, //     LOGICAL_MAXIMUM (127)
+  REPORT_SIZE(1),      0x08, //     REPORT_SIZE (8)
+  REPORT_COUNT(1),     0x01, //     REPORT_COUNT (1)
+  HIDINPUT(1),         0x06, //     INPUT (Data, Var, Rel)
+  END_COLLECTION(0),         //   	END_COLLECTION
+  END_COLLECTION(0),         //   	END_COLLECTION
 };
 
-BleKeyboard::BleKeyboard(std::string deviceName, std::string deviceManufacturer, uint8_t batteryLevel) 
-    : hid(0)
-    , deviceName(std::string(deviceName).substr(0, 15))
-    , deviceManufacturer(std::string(deviceManufacturer).substr(0,15))
-    , batteryLevel(batteryLevel) {}
+BleKeyboard::BleKeyboard(std::string deviceName, std::string deviceManufacturer, uint8_t batteryLevel)
+	: hid(0)
+	, deviceName(std::string(deviceName).substr(0, 15))
+	, deviceManufacturer(std::string(deviceManufacturer).substr(0, 15))
+	, batteryLevel(batteryLevel)
+	, _buttons(0) {}
 
 void BleKeyboard::begin(void)
 {
-  BLEDevice::init(deviceName);
-  BLEServer* pServer = BLEDevice::createServer();
-  pServer->setCallbacks(this);
+	BLEDevice::init(deviceName);
+	BLEServer* pServer = BLEDevice::createServer();
+	pServer->setCallbacks(this);
 
-  hid = new BLEHIDDevice(pServer);
-  inputKeyboard = hid->inputReport(KEYBOARD_ID);  // <-- input REPORTID from report map
-  outputKeyboard = hid->outputReport(KEYBOARD_ID);
-  inputMediaKeys = hid->inputReport(MEDIA_KEYS_ID);
+	hid = new BLEHIDDevice(pServer);
+	inputKeyboard = hid->inputReport(KEYBOARD_ID);  // <-- input REPORTID from report map
+	outputKeyboard = hid->outputReport(KEYBOARD_ID);
+	inputMediaKeys = hid->inputReport(MEDIA_KEYS_ID);
+	inputMouse = hid->inputReport(MOUSE_ID);
 
-  outputKeyboard->setCallbacks(this);
+	outputKeyboard->setCallbacks(this);
 
-  hid->manufacturer()->setValue(deviceManufacturer);
+	hid->manufacturer()->setValue(deviceManufacturer);
 
-  hid->pnp(0x02, vid, pid, version);
-  hid->hidInfo(0x00, 0x01);
+	hid->pnp(0x02, vid, pid, version);
+	hid->hidInfo(0x00, 0x01);
 
 
 #if defined(USE_NIMBLE)
 
-  BLEDevice::setSecurityAuth(true, true, true);
+	BLEDevice::setSecurityAuth(true, true, true);
 
 #else
 
-  BLESecurity* pSecurity = new BLESecurity();
-  pSecurity->setAuthenticationMode(ESP_LE_AUTH_REQ_SC_MITM_BOND);
+	BLESecurity* pSecurity = new BLESecurity();
+	pSecurity->setAuthenticationMode(ESP_LE_AUTH_REQ_SC_MITM_BOND);
 
 #endif // USE_NIMBLE
 
-  hid->reportMap((uint8_t*)_hidReportDescriptor, sizeof(_hidReportDescriptor));
-  hid->startServices();
+	hid->reportMap((uint8_t*)_hidReportDescriptor, sizeof(_hidReportDescriptor));
+	hid->startServices();
 
-  onStarted(pServer);
+	onStarted(pServer);
 
-  advertising = pServer->getAdvertising();
-  advertising->setAppearance(HID_KEYBOARD);
-  advertising->addServiceUUID(hid->hidService()->getUUID());
-  advertising->setScanResponse(false);
-  advertising->start();
-  hid->setBatteryLevel(batteryLevel);
+	advertising = pServer->getAdvertising();
+	advertising->setAppearance(HID_KEYBOARD);
+	advertising->addServiceUUID(hid->hidService()->getUUID());
+	advertising->setScanResponse(false);
+	advertising->start();
+	hid->setBatteryLevel(batteryLevel);
 
-  ESP_LOGD(LOG_TAG, "Advertising started!");
+	ESP_LOGD(LOG_TAG, "Advertising started!");
 }
 
 void BleKeyboard::end(void)
 {
 }
 
+void BleKeyboard::clickMouse(uint8_t b)
+{
+	_buttons = b;
+	moveMouse(0, 0, 0, 0);
+	_buttons = 0;
+	moveMouse(0, 0, 0, 0);
+}
+
+void BleKeyboard::moveMouse(signed char x, signed char y, signed char wheel, signed char hWheel)
+{
+	if (this->isConnected())
+	{
+		uint8_t m[5];
+		m[0] = _buttons;
+		m[1] = x;
+		m[2] = y;
+		m[3] = wheel;
+		m[4] = hWheel;
+		this->inputMouse->setValue(m, 5);
+		this->inputMouse->notify();
+	}
+}
+
+void BleKeyboard::buttons(uint8_t b)
+{
+	if (b != _buttons)
+	{
+		_buttons = b;
+		moveMouse(0, 0, 0, 0);
+	}
+}
+
+void BleKeyboard::pressMouse(uint8_t b)
+{
+	buttons(_buttons | b);
+}
+
+void BleKeyboard::releaseMouse(uint8_t b)
+{
+	buttons(_buttons & ~b);
+}
+
+bool BleKeyboard::isPressedMouse(uint8_t b)
+{
+	if ((b & _buttons) > 0)
+		return true;
+	return false;
+}
+
 bool BleKeyboard::isConnected(void) {
-  return this->connected;
+	return this->connected;
 }
 
 void BleKeyboard::setBatteryLevel(uint8_t level) {
-  this->batteryLevel = level;
-  if (hid != 0)
-    this->hid->setBatteryLevel(this->batteryLevel);
+	this->batteryLevel = level;
+	if (hid != 0)
+		this->hid->setBatteryLevel(this->batteryLevel);
 }
 
 //must be called before begin in order to set the name
 void BleKeyboard::setName(std::string deviceName) {
-  this->deviceName = deviceName;
+	this->deviceName = deviceName;
 }
 
 /**
  * @brief Sets the waiting time (in milliseconds) between multiple keystrokes in NimBLE mode.
- * 
+ *
  * @param ms Time in milliseconds
  */
 void BleKeyboard::setDelay(uint32_t ms) {
-  this->_delay_ms = ms;
+	this->_delay_ms = ms;
 }
 
-void BleKeyboard::set_vendor_id(uint16_t vid) { 
-	this->vid = vid; 
+void BleKeyboard::set_vendor_id(uint16_t vid) {
+	this->vid = vid;
 }
 
-void BleKeyboard::set_product_id(uint16_t pid) { 
-	this->pid = pid; 
+void BleKeyboard::set_product_id(uint16_t pid) {
+	this->pid = pid;
 }
 
-void BleKeyboard::set_version(uint16_t version) { 
-	this->version = version; 
+void BleKeyboard::set_version(uint16_t version) {
+	this->version = version;
 }
 
 void BleKeyboard::sendReport(KeyReport* keys)
 {
-  if (this->isConnected())
-  {
-    this->inputKeyboard->setValue((uint8_t*)keys, sizeof(KeyReport));
-    this->inputKeyboard->notify();
+	if (this->isConnected())
+	{
+		this->inputKeyboard->setValue((uint8_t*)keys, sizeof(KeyReport));
+		this->inputKeyboard->notify();
 #if defined(USE_NIMBLE)        
-    // vTaskDelay(delayTicks);
-    this->delay_ms(_delay_ms);
+		// vTaskDelay(delayTicks);
+		this->delay_ms(_delay_ms);
 #endif // USE_NIMBLE
-  }	
+	}
 }
 
 void BleKeyboard::sendReport(MediaKeyReport* keys)
 {
-  if (this->isConnected())
-  {
-    this->inputMediaKeys->setValue((uint8_t*)keys, sizeof(MediaKeyReport));
-    this->inputMediaKeys->notify();
+	if (this->isConnected())
+	{
+		this->inputMediaKeys->setValue((uint8_t*)keys, sizeof(MediaKeyReport));
+		this->inputMediaKeys->notify();
 #if defined(USE_NIMBLE)        
-    //vTaskDelay(delayTicks);
-    this->delay_ms(_delay_ms);
+		//vTaskDelay(delayTicks);
+		this->delay_ms(_delay_ms);
 #endif // USE_NIMBLE
-  }	
+	}
 }
 
 extern
@@ -251,17 +345,17 @@ const uint8_t _asciimap[128] =
 	0x00,             // US
 
 	0x2c,		   //  ' '
-	0x1e|SHIFT,	   // !
-	0x34|SHIFT,	   // "
-	0x20|SHIFT,    // #
-	0x21|SHIFT,    // $
-	0x22|SHIFT,    // %
-	0x24|SHIFT,    // &
+	0x1e | SHIFT,	   // !
+	0x34 | SHIFT,	   // "
+	0x20 | SHIFT,    // #
+	0x21 | SHIFT,    // $
+	0x22 | SHIFT,    // %
+	0x24 | SHIFT,    // &
 	0x34,          // '
-	0x26|SHIFT,    // (
-	0x27|SHIFT,    // )
-	0x25|SHIFT,    // *
-	0x2e|SHIFT,    // +
+	0x26 | SHIFT,    // (
+	0x27 | SHIFT,    // )
+	0x25 | SHIFT,    // *
+	0x2e | SHIFT,    // +
 	0x36,          // ,
 	0x2d,          // -
 	0x37,          // .
@@ -276,44 +370,44 @@ const uint8_t _asciimap[128] =
 	0x24,          // 7
 	0x25,          // 8
 	0x26,          // 9
-	0x33|SHIFT,      // :
+	0x33 | SHIFT,      // :
 	0x33,          // ;
-	0x36|SHIFT,      // <
+	0x36 | SHIFT,      // <
 	0x2e,          // =
-	0x37|SHIFT,      // >
-	0x38|SHIFT,      // ?
-	0x1f|SHIFT,      // @
-	0x04|SHIFT,      // A
-	0x05|SHIFT,      // B
-	0x06|SHIFT,      // C
-	0x07|SHIFT,      // D
-	0x08|SHIFT,      // E
-	0x09|SHIFT,      // F
-	0x0a|SHIFT,      // G
-	0x0b|SHIFT,      // H
-	0x0c|SHIFT,      // I
-	0x0d|SHIFT,      // J
-	0x0e|SHIFT,      // K
-	0x0f|SHIFT,      // L
-	0x10|SHIFT,      // M
-	0x11|SHIFT,      // N
-	0x12|SHIFT,      // O
-	0x13|SHIFT,      // P
-	0x14|SHIFT,      // Q
-	0x15|SHIFT,      // R
-	0x16|SHIFT,      // S
-	0x17|SHIFT,      // T
-	0x18|SHIFT,      // U
-	0x19|SHIFT,      // V
-	0x1a|SHIFT,      // W
-	0x1b|SHIFT,      // X
-	0x1c|SHIFT,      // Y
-	0x1d|SHIFT,      // Z
+	0x37 | SHIFT,      // >
+	0x38 | SHIFT,      // ?
+	0x1f | SHIFT,      // @
+	0x04 | SHIFT,      // A
+	0x05 | SHIFT,      // B
+	0x06 | SHIFT,      // C
+	0x07 | SHIFT,      // D
+	0x08 | SHIFT,      // E
+	0x09 | SHIFT,      // F
+	0x0a | SHIFT,      // G
+	0x0b | SHIFT,      // H
+	0x0c | SHIFT,      // I
+	0x0d | SHIFT,      // J
+	0x0e | SHIFT,      // K
+	0x0f | SHIFT,      // L
+	0x10 | SHIFT,      // M
+	0x11 | SHIFT,      // N
+	0x12 | SHIFT,      // O
+	0x13 | SHIFT,      // P
+	0x14 | SHIFT,      // Q
+	0x15 | SHIFT,      // R
+	0x16 | SHIFT,      // S
+	0x17 | SHIFT,      // T
+	0x18 | SHIFT,      // U
+	0x19 | SHIFT,      // V
+	0x1a | SHIFT,      // W
+	0x1b | SHIFT,      // X
+	0x1c | SHIFT,      // Y
+	0x1d | SHIFT,      // Z
 	0x2f,          // [
 	0x31,          // bslash
 	0x30,          // ]
-	0x23|SHIFT,    // ^
-	0x2d|SHIFT,    // _
+	0x23 | SHIFT,    // ^
+	0x2d | SHIFT,    // _
 	0x35,          // `
 	0x04,          // a
 	0x05,          // b
@@ -341,10 +435,10 @@ const uint8_t _asciimap[128] =
 	0x1b,          // x
 	0x1c,          // y
 	0x1d,          // z
-	0x2f|SHIFT,    // {
-	0x31|SHIFT,    // |
-	0x30|SHIFT,    // }
-	0x35|SHIFT,    // ~
+	0x2f | SHIFT,    // {
+	0x31 | SHIFT,    // |
+	0x30 | SHIFT,    // }
+	0x35 | SHIFT,    // ~
 	0				// DEL
 };
 
@@ -360,10 +454,12 @@ size_t BleKeyboard::press(uint8_t k)
 	uint8_t i;
 	if (k >= 136) {			// it's a non-printing key (not a modifier)
 		k = k - 136;
-	} else if (k >= 128) {	// it's a modifier key
-		_keyReport.modifiers |= (1<<(k-128));
+	}
+	else if (k >= 128) {	// it's a modifier key
+		_keyReport.modifiers |= (1 << (k - 128));
 		k = 0;
-	} else {				// it's a printing key
+	}
+	else {				// it's a printing key
 		k = pgm_read_byte(_asciimap + k);
 		if (!k) {
 			setWriteError();
@@ -381,7 +477,7 @@ size_t BleKeyboard::press(uint8_t k)
 		_keyReport.keys[2] != k && _keyReport.keys[3] != k &&
 		_keyReport.keys[4] != k && _keyReport.keys[5] != k) {
 
-		for (i=0; i<6; i++) {
+		for (i = 0; i < 6; i++) {
 			if (_keyReport.keys[i] == 0x00) {
 				_keyReport.keys[i] = k;
 				break;
@@ -398,12 +494,12 @@ size_t BleKeyboard::press(uint8_t k)
 
 size_t BleKeyboard::press(const MediaKeyReport k)
 {
-    uint16_t k_16 = k[1] | (k[0] << 8);
-    uint16_t mediaKeyReport_16 = _mediaKeyReport[1] | (_mediaKeyReport[0] << 8);
+	uint16_t k_16 = k[1] | (k[0] << 8);
+	uint16_t mediaKeyReport_16 = _mediaKeyReport[1] | (_mediaKeyReport[0] << 8);
 
-    mediaKeyReport_16 |= k_16;
-    _mediaKeyReport[0] = (uint8_t)((mediaKeyReport_16 & 0xFF00) >> 8);
-    _mediaKeyReport[1] = (uint8_t)(mediaKeyReport_16 & 0x00FF);
+	mediaKeyReport_16 |= k_16;
+	_mediaKeyReport[0] = (uint8_t)((mediaKeyReport_16 & 0xFF00) >> 8);
+	_mediaKeyReport[1] = (uint8_t)(mediaKeyReport_16 & 0x00FF);
 
 	sendReport(&_mediaKeyReport);
 	return 1;
@@ -417,10 +513,12 @@ size_t BleKeyboard::release(uint8_t k)
 	uint8_t i;
 	if (k >= 136) {			// it's a non-printing key (not a modifier)
 		k = k - 136;
-	} else if (k >= 128) {	// it's a modifier key
-		_keyReport.modifiers &= ~(1<<(k-128));
+	}
+	else if (k >= 128) {	// it's a modifier key
+		_keyReport.modifiers &= ~(1 << (k - 128));
 		k = 0;
-	} else {				// it's a printing key
+	}
+	else {				// it's a printing key
 		k = pgm_read_byte(_asciimap + k);
 		if (!k) {
 			return 0;
@@ -433,7 +531,7 @@ size_t BleKeyboard::release(uint8_t k)
 
 	// Test the key report to see if k is present.  Clear it if it exists.
 	// Check all positions in case the key is present more than once (which it shouldn't be)
-	for (i=0; i<6; i++) {
+	for (i = 0; i < 6; i++) {
 		if (0 != k && _keyReport.keys[i] == k) {
 			_keyReport.keys[i] = 0x00;
 		}
@@ -445,11 +543,11 @@ size_t BleKeyboard::release(uint8_t k)
 
 size_t BleKeyboard::release(const MediaKeyReport k)
 {
-    uint16_t k_16 = k[1] | (k[0] << 8);
-    uint16_t mediaKeyReport_16 = _mediaKeyReport[1] | (_mediaKeyReport[0] << 8);
-    mediaKeyReport_16 &= ~k_16;
-    _mediaKeyReport[0] = (uint8_t)((mediaKeyReport_16 & 0xFF00) >> 8);
-    _mediaKeyReport[1] = (uint8_t)(mediaKeyReport_16 & 0x00FF);
+	uint16_t k_16 = k[1] | (k[0] << 8);
+	uint16_t mediaKeyReport_16 = _mediaKeyReport[1] | (_mediaKeyReport[0] << 8);
+	mediaKeyReport_16 &= ~k_16;
+	_mediaKeyReport[0] = (uint8_t)((mediaKeyReport_16 & 0xFF00) >> 8);
+	_mediaKeyReport[1] = (uint8_t)(mediaKeyReport_16 & 0x00FF);
 
 	sendReport(&_mediaKeyReport);
 	return 1;
@@ -464,8 +562,8 @@ void BleKeyboard::releaseAll(void)
 	_keyReport.keys[4] = 0;
 	_keyReport.keys[5] = 0;
 	_keyReport.modifiers = 0;
-    _mediaKeyReport[0] = 0;
-    _mediaKeyReport[1] = 0;
+	_mediaKeyReport[0] = 0;
+	_mediaKeyReport[1] = 0;
 	sendReport(&_keyReport);
 }
 
@@ -483,14 +581,15 @@ size_t BleKeyboard::write(const MediaKeyReport c)
 	return p;              // just return the result of press() since release() almost always returns 1
 }
 
-size_t BleKeyboard::write(const uint8_t *buffer, size_t size) {
+size_t BleKeyboard::write(const uint8_t* buffer, size_t size) {
 	size_t n = 0;
 	while (size--) {
 		if (*buffer != '\r') {
 			if (write(*buffer)) {
-			  n++;
-			} else {
-			  break;
+				n++;
+			}
+			else {
+				break;
 			}
 		}
 		buffer++;
@@ -499,47 +598,47 @@ size_t BleKeyboard::write(const uint8_t *buffer, size_t size) {
 }
 
 void BleKeyboard::onConnect(BLEServer* pServer) {
-  this->connected = true;
+	this->connected = true;
 
 #if !defined(USE_NIMBLE)
 
-  BLE2902* desc = (BLE2902*)this->inputKeyboard->getDescriptorByUUID(BLEUUID((uint16_t)0x2902));
-  desc->setNotifications(true);
-  desc = (BLE2902*)this->inputMediaKeys->getDescriptorByUUID(BLEUUID((uint16_t)0x2902));
-  desc->setNotifications(true);
+	BLE2902* desc = (BLE2902*)this->inputKeyboard->getDescriptorByUUID(BLEUUID((uint16_t)0x2902));
+	desc->setNotifications(true);
+	desc = (BLE2902*)this->inputMediaKeys->getDescriptorByUUID(BLEUUID((uint16_t)0x2902));
+	desc->setNotifications(true);
 
 #endif // !USE_NIMBLE
 
 }
 
 void BleKeyboard::onDisconnect(BLEServer* pServer) {
-  this->connected = false;
+	this->connected = false;
 
 #if !defined(USE_NIMBLE)
 
-  BLE2902* desc = (BLE2902*)this->inputKeyboard->getDescriptorByUUID(BLEUUID((uint16_t)0x2902));
-  desc->setNotifications(false);
-  desc = (BLE2902*)this->inputMediaKeys->getDescriptorByUUID(BLEUUID((uint16_t)0x2902));
-  desc->setNotifications(false);
+	BLE2902* desc = (BLE2902*)this->inputKeyboard->getDescriptorByUUID(BLEUUID((uint16_t)0x2902));
+	desc->setNotifications(false);
+	desc = (BLE2902*)this->inputMediaKeys->getDescriptorByUUID(BLEUUID((uint16_t)0x2902));
+	desc->setNotifications(false);
 
-  advertising->start();
+	advertising->start();
 
 #endif // !USE_NIMBLE
 }
 
 void BleKeyboard::onWrite(BLECharacteristic* me) {
-  uint8_t* value = (uint8_t*)(me->getValue().c_str());
-  (void)value;
-  ESP_LOGI(LOG_TAG, "special keys: %d", *value);
+	uint8_t* value = (uint8_t*)(me->getValue().c_str());
+	(void)value;
+	ESP_LOGI(LOG_TAG, "special keys: %d", *value);
 }
 
 void BleKeyboard::delay_ms(uint64_t ms) {
-  uint64_t m = esp_timer_get_time();
-  if(ms){
-    uint64_t e = (m + (ms * 1000));
-    if(m > e){ //overflow
-        while(esp_timer_get_time() > e) { }
-    }
-    while(esp_timer_get_time() < e) {}
-  }
+	uint64_t m = esp_timer_get_time();
+	if (ms) {
+		uint64_t e = (m + (ms * 1000));
+		if (m > e) { //overflow
+			while (esp_timer_get_time() > e) {}
+		}
+		while (esp_timer_get_time() < e) {}
+	}
 }
