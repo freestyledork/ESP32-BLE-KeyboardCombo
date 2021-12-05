@@ -155,8 +155,10 @@ void BleKeyboard::begin(void)
 	outputKeyboard = hid->outputReport(KEYBOARD_ID);
 	inputMediaKeys = hid->inputReport(MEDIA_KEYS_ID);
 	inputMouse = hid->inputReport(MOUSE_ID);
+	outputMouse = hid->outputReport(MOUSE_ID);
 
 	outputKeyboard->setCallbacks(this);
+	outputMouse->setCallbacks(this);
 
 	hid->manufacturer()->setValue(deviceManufacturer);
 
@@ -214,6 +216,10 @@ void BleKeyboard::moveMouse(signed char x, signed char y, signed char wheel, sig
 		m[4] = hWheel;
 		this->inputMouse->setValue(m, 5);
 		this->inputMouse->notify();
+#if defined(USE_NIMBLE)        
+		// vTaskDelay(delayTicks);
+		this->delay_ms(_delay_ms);
+#endif // USE_NIMBLE
 	}
 }
 
@@ -606,6 +612,8 @@ void BleKeyboard::onConnect(BLEServer* pServer) {
 	desc->setNotifications(true);
 	desc = (BLE2902*)this->inputMediaKeys->getDescriptorByUUID(BLEUUID((uint16_t)0x2902));
 	desc->setNotifications(true);
+	desc = (BLE2902*)this->inputMouse->getDescriptorByUUID(BLEUUID((uint16_t)0x2902));
+	desc->setNotifications(true);
 
 #endif // !USE_NIMBLE
 
@@ -619,6 +627,8 @@ void BleKeyboard::onDisconnect(BLEServer* pServer) {
 	BLE2902* desc = (BLE2902*)this->inputKeyboard->getDescriptorByUUID(BLEUUID((uint16_t)0x2902));
 	desc->setNotifications(false);
 	desc = (BLE2902*)this->inputMediaKeys->getDescriptorByUUID(BLEUUID((uint16_t)0x2902));
+	desc->setNotifications(false);
+	desc = (BLE2902*)this->inputMouse->getDescriptorByUUID(BLEUUID((uint16_t)0x2902));
 	desc->setNotifications(false);
 
 	advertising->start();
